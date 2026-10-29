@@ -1,0 +1,95 @@
+'use client'
+
+import { useState, useEffect } from 'react'
+import { createClient } from '@/lib/supabase/client'
+import { createNotification, sendBrowserNotification } from '@/lib/notifications'
+
+type MemberPickerProps = {
+  cardId: string
+  cardTitle: string
+  currentMembers: any[]
+  onUpdate: () => void
+  onClose: () => void
+}
+
+export function MemberPicker({ cardId, cardTitle, currentMembers, onUpdate, onClose }: MemberPickerProps) {
+  const [allUsers, setAllUsers] = useState<any[]>([])
+  const [loading, setLoading] = useState(false)
+  const supabase = createClient()
+
+  useEffect(() => {
+    fetchUsers()
+  }, [])
+
+  const fetchUsers = async () => {
+    const { data } = await supabase
+      .from('profiles')
+      .select('id, name, email')
+
+    setAllUsers(data || [])
+  }
+
+  const handleToggleMember = async (userId: string) => {
+    const isAssigned = currentMembers.some(m => m.user_id === userId)
+
+    setLoading(true)
+    try {
+      if (isAssigned) {
+        const { error } = await supabase
+          .from('card_members')
+          .delete()
+          .eq('card_id', cardId)
+          .eq('user_id', userId)
+
+        if (error) throw error
+      } else {
+        const { error } = await supabase
+          .from('card_members')
+          .insert({ card_id: cardId, user_id: userId })
+
+        if (error) throw error
+
+        await createNotification(userId, 'member_assigned', cardId, `"${cardTitle}" 카드에 멤버로 추가되었습니다`)
+        sendBrowserNotification('멤버 추가', `"${cardTitle}" 카드에 추가되었습니다`)
+      }
+
+      onUpdate()
+    } catch (error) {
+      console.error('Error toggling member:', error)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  return (
+    <div className="absolute top-full left-0 mt-2 bg-white rounded-lg shadow-xl border border-gray-200 p-4 w-64 z-10">
+      <div className="flex items-center justify-between mb-3">
+        <h4 className="font-semibold text-gray-900">멤버</h4>
+        <button onClick={onClose} className="text-gray-400 hover:text-gray-600 text-xl">×</button>
+      </div>
+
+      <div className="space-y-2">
+        {allUsers.map((user) => {
+          const isAssigned = currentMembers.some(m => m.user_id === user.id)
+          return (
+            <button
+              key={user.id}
+              onClick={() => handleToggleMember(user.id)}
+              disabled={loading}
+              className="w-full flex items-center gap-3 px-3 py-2 rounded hover:bg-gray-50 transition-colors disabled:opacity-50"
+            >
+              <div className="w-10 h-8 rounded-lg bg-gray-700 text-white text-xs flex items-center justify-center">
+                {(user.name?.slice(1) || user.name?.[0] || "").toUpperCase()}
+              </div>
+              <div className="flex-1 text-left">
+                <p className="text-gray-900 font-medium">{user.name}</p>
+                <p className="text-xs text-gray-500">{user.email}</p>
+              </div>
+              {isAssigned && <span className="text-gray-900 font-bold">✓</span>}
+            </button>
+          )
+        })}
+      </div>
+    </div>
+  )
+}

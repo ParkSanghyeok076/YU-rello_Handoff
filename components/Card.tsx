@@ -1,0 +1,240 @@
+'use client'
+
+import { useState, useEffect, useRef } from 'react'
+import { createClient } from '@/lib/supabase/client'
+import { CopyCardModal } from './CopyCardModal'
+import { motion } from 'framer-motion'
+import { useSortable } from '@dnd-kit/sortable'
+import { CSS } from '@dnd-kit/utilities'
+import { CardModal } from './CardModal'
+
+type CardProps = {
+  card: any
+  onUpdate?: () => void
+  currentUserId?: string
+  currentUserName?: string
+}
+
+function fmtDate(iso: string): string {
+  // iso can be YYYY-MM-DD (start_date) or YYYY-MM-DDTHH:MM:SS (due_date)
+  const d = new Date(iso.split('T')[0] + 'T00:00:00')
+  return d.toLocaleDateString('ko-KR', { month: 'short', day: 'numeric' })
+}
+
+function formatCardDates(start_date: string | null, due_date: string | null): string | null {
+  if (start_date && due_date) return `${fmtDate(start_date)} ~ ${fmtDate(due_date)}`
+  if (start_date) return fmtDate(start_date)
+  if (due_date) return fmtDate(due_date)
+  return null
+}
+
+export function Card({ card, onUpdate, currentUserId = '', currentUserName = 'User' }: CardProps) {
+  const [isModalOpen, setIsModalOpen] = useState(false)
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null)
+  const [isCopyModalOpen, setIsCopyModalOpen] = useState(false)
+  const contextMenuRef = useRef<HTMLDivElement>(null)
+  const supabase = createClient()
+
+  const {
+    attributes,
+    listeners,
+    setNodeRef,
+    transform,
+    transition,
+    isDragging,
+  } = useSortable({ id: card.id })
+
+  const style = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+  }
+
+  useEffect(() => {
+    function handleClickOutside(e: MouseEvent) {
+      if (contextMenuRef.current && !contextMenuRef.current.contains(e.target as Node)) {
+        setContextMenu(null)
+      }
+    }
+    if (contextMenu) {
+      document.addEventListener('mousedown', handleClickOutside)
+    }
+    return () => document.removeEventListener('mousedown', handleClickOutside)
+  }, [contextMenu])
+
+  const handleContextMenu = (e: React.MouseEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+    setContextMenu({ x: e.clientX, y: e.clientY })
+  }
+
+  const handleArchiveCard = async (e: React.MouseEvent) => {
+    e.stopPropagation()
+    setContextMenu(null)
+    await supabase
+      .from('cards')
+      .update({ archived_at: new Date().toISOString() })
+      .eq('id', card.id)
+    onUpdate?.()
+  }
+
+  const handleDeleteCard = async (e: React.MouseEvent) => {
+    e.stopPropagation()
+    setContextMenu(null)
+    if (!confirm('정말 이 카드를 삭제하시겠습니까?')) return
+    await supabase.from('cards').delete().eq('id', card.id)
+    onUpdate?.()
+  }
+
+  const allItems = card.checklists?.flatMap((cl: any) => cl.checklist_items || []) || []
+  const completedItems = allItems.filter((item: any) => item.completed).length
+  const totalItems = allItems.length
+  const hasComments = card.comments?.length > 0
+
+  return (
+    <>
+      <motion.div
+        ref={setNodeRef}
+        style={style}
+        data-no-pan
+        {...attributes}
+        {...listeners}
+        initial={{ opacity: 0, y: -8 }}
+        animate={{ opacity: isDragging ? 0.4 : 1, y: 0 }}
+        transition={{ duration: 0.15 }}
+        whileHover={{ y: -2, transition: { duration: 0.1 } }}
+        onClick={() => setIsModalOpen(true)}
+        onContextMenu={handleContextMenu}
+        className="relative group bg-white border border-gray-200 rounded-lg p-3 cursor-pointer shadow-sm hover:shadow-md transition-shadow"
+      >
+        {/* Hover edit button */}
+        <button
+          className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity w-6 h-6 bg-gray-100 hover:bg-gray-200 rounded flex items-center justify-center text-gray-500 text-xs z-10"
+          onClick={(e) => { e.stopPropagation(); setIsModalOpen(true) }}
+          title="편집"
+        >
+          ✎
+        </button>
+
+        {/* Labels */}
+        {card.card_labels?.length > 0 && (
+          <div className="flex gap-1 mb-2">
+            {card.card_labels.map((cl: any) => (
+              <div
+                key={cl.label_id}
+                className="h-2 w-10 rounded"
+                style={{ backgroundColor: cl.labels?.color }}
+              />
+            ))}
+          </div>
+        )}
+
+        {/* Title */}
+        <p className="text-gray-800 font-medium mb-2 pr-6">{card.title}</p>
+
+        {/* Metadata */}
+        <div className="flex items-center gap-2 text-sm text-gray-500 flex-wrap">
+          {totalItems > 0 && (
+            <span className={`flex items-center gap-1 px-1.5 py-0.5 rounded text-xs font-medium ${
+              completedItems === totalItems
+                ? 'bg-green-100 text-green-700'
+                : 'bg-gray-100 text-gray-600'
+            }`}>
+              ✓ {completedItems}/{totalItems}
+            </span>
+          )}
+          {hasComments && (
+            <span className="flex items-center gap-1 text-xs text-gray-500">
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+              </svg>
+              {card.comments.length}
+            </span>
+          )}
+          {formatCardDates(card.start_date, card.due_date) && (
+            <span className="flex items-center gap-1 text-xs text-gray-500">
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <rect x="3" y="4" width="18" height="18" rx="2" ry="2"/>
+                <line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/>
+              </svg>
+              {formatCardDates(card.start_date, card.due_date)}
+            </span>
+          )}
+        </div>
+
+        {/* Members */}
+        {card.card_members?.length > 0 && (
+          <div className="flex gap-1 mt-2">
+            {card.card_members.slice(0, 3).map((member: any) => (
+              <div
+                key={member.user_id}
+                className="w-8 h-6 rounded-lg bg-gray-600 text-white text-xs flex items-center justify-center font-medium"
+                title={member.profiles?.name}
+              >
+                {(member.profiles?.name?.slice(1) || member.profiles?.name?.[0] || "").toUpperCase()}
+              </div>
+            ))}
+          </div>
+        )}
+
+      </motion.div>
+
+      {/* Right-click context menu — rendered OUTSIDE motion.div to avoid CSS transform positioning bug */}
+      {contextMenu && (
+        <div
+          ref={contextMenuRef}
+          className="fixed bg-white border border-gray-200 rounded-lg shadow-xl z-[100] overflow-hidden py-1 min-w-[140px]"
+          style={{ left: contextMenu.x, top: contextMenu.y }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <button
+            className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 flex items-center gap-2"
+            onClick={(e) => {
+              e.stopPropagation()
+              setContextMenu(null)
+              setIsCopyModalOpen(true)
+            }}
+          >
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
+              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+            </svg>
+            카드 복사
+          </button>
+          <button
+            className="w-full text-left px-4 py-2 text-sm text-red-600 hover:bg-red-50 flex items-center gap-2"
+            onClick={handleDeleteCard}
+          >
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/>
+            </svg>
+            카드 삭제
+          </button>
+          <button
+            className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 flex items-center gap-2"
+            onClick={handleArchiveCard}
+          >
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <polyline points="21 8 21 21 3 21 3 8"/><rect x="1" y="3" width="22" height="5"/><line x1="10" y1="12" x2="14" y2="12"/>
+            </svg>
+            아카이빙
+          </button>
+        </div>
+      )}
+
+      <CardModal
+        cardId={card.id}
+        isOpen={isModalOpen}
+        onClose={() => setIsModalOpen(false)}
+        onUpdate={onUpdate || (() => {})}
+        currentUserId={currentUserId}
+        currentUserName={currentUserName}
+      />
+      <CopyCardModal
+        sourceCardId={card.id}
+        isOpen={isCopyModalOpen}
+        onClose={() => setIsCopyModalOpen(false)}
+        onSuccess={() => { setIsCopyModalOpen(false); onUpdate?.() }}
+      />
+    </>
+  )
+}

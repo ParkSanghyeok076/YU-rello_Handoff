@@ -1,0 +1,384 @@
+'use client'
+
+import { useState, useEffect, useRef } from 'react'
+import { createClient } from '@/lib/supabase/client'
+import { ArchivePanel } from './ArchivePanel'
+import { WeeklyReportModal } from './WeeklyReportModal'
+
+type UpcomingTask = {
+  id: string
+  title: string
+  due_date: string
+  completed: boolean
+  cards: {
+    id: string
+    title: string
+    card_members: Array<{
+      user_id: string
+      profiles: { id: string; name: string } | null
+    }>
+  } | null
+}
+
+type ToolbarProps = {
+  boardId: string
+  onViewChange: (view: 'board' | 'calendar') => void
+  onUserFilterChange: (userId: string | null) => void
+  users: Array<{ id: string; name: string }>
+  onBoardUpdate: () => void
+}
+
+export function Toolbar({ boardId, onViewChange, onUserFilterChange, users, onBoardUpdate }: ToolbarProps) {
+  const [currentView, setCurrentView] = useState<'board' | 'calendar'>('board')
+  const [selectedUser, setSelectedUser] = useState<string | null>(null)
+  const [isAlarmOpen, setIsAlarmOpen] = useState(false)
+  const [allUpcomingTasks, setAllUpcomingTasks] = useState<UpcomingTask[]>([])
+  const [alarmLoading, setAlarmLoading] = useState(false)
+  const [selectedAlarmMember, setSelectedAlarmMember] = useState<string | null>(null)
+  const [isArchiveOpen, setIsArchiveOpen] = useState(false)
+  const [isReportOpen, setIsReportOpen] = useState(false)
+  const alarmRef = useRef<HTMLDivElement>(null)
+  const archiveRef = useRef<HTMLDivElement>(null)
+  const supabase = createClient()
+
+  // Close alarm dropdown on outside click
+  useEffect(() => {
+    function handleClickOutside(e: MouseEvent) {
+      if (alarmRef.current && !alarmRef.current.contains(e.target as Node)) {
+        setIsAlarmOpen(false)
+      }
+    }
+    if (isAlarmOpen) {
+      document.addEventListener('mousedown', handleClickOutside)
+    }
+    return () => document.removeEventListener('mousedown', handleClickOutside)
+  }, [isAlarmOpen])
+
+  useEffect(() => {
+    function handleClickOutside(e: MouseEvent) {
+      if (archiveRef.current && !archiveRef.current.contains(e.target as Node)) {
+        setIsArchiveOpen(false)
+      }
+    }
+    if (isArchiveOpen) {
+      document.addEventListener('mousedown', handleClickOutside)
+    }
+    return () => document.removeEventListener('mousedown', handleClickOutside)
+  }, [isArchiveOpen])
+
+  const handleViewChange = (view: 'board' | 'calendar') => {
+    setCurrentView(view)
+    onViewChange(view)
+  }
+
+  const handleUserFilterChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
+    const value = e.target.value === 'all' ? null : e.target.value
+    setSelectedUser(value)
+    onUserFilterChange(value)
+  }
+
+  const handleAlarmClick = async () => {
+    if (isAlarmOpen) {
+      setIsAlarmOpen(false)
+      return
+    }
+
+    setAlarmLoading(true)
+    setIsAlarmOpen(true)
+
+    try {
+      const today = new Date().toISOString().split('T')[0]
+      console.log('🔍 [알림 디버그] boardId:', boardId)
+      console.log('🔍 [알림 디버그] today:', today)
+
+      // Step 1: get all card IDs in this board
+      const { data: listData, error: listError } = await supabase
+        .from('lists')
+        .select('cards(id, archived_at)')
+        .eq('board_id', boardId)
+        .is('archived_at', null)
+
+      console.log('🔍 [알림 디버그] Step 1 - listData:', listData)
+      console.log('🔍 [알림 디버그] Step 1 - listError:', listError)
+
+      if (listError) throw listError
+
+      const cardIds = (listData ?? []).flatMap((l: any) =>
+        ((l.cards ?? []) as Array<{ id: string; archived_at: string | null }>)
+          .filter((c) => !c.archived_at)
+          .map((c) => c.id)
+      )
+
+      console.log('🔍 [알림 디버그] Step 1 - cardIds:', cardIds)
+      console.log('🔍 [알림 디버그] Step 1 - cardIds.length:', cardIds.length)
+
+      if (cardIds.length === 0) {
+        console.log('⚠️ [알림 디버그] cardIds가 비어있음 - 알림 없음으로 표시')
+        setAllUpcomingTasks([])
+        return
+      }
+
+      // Step 2: fetch all incomplete checklist items (including overdue) scoped to those cards
+      const { data, error } = await supabase
+        .from('checklist_items')
+        .select(`
+          id, title, due_date, completed,
+          checklists (
+            card_id,
+            cards (
+              id, title,
+              card_members (
+                user_id,
+                profiles ( id, name )
+              )
+            )
+          )
+        `)
+        .eq('completed', false)
+        .not('due_date', 'is', null)
+        .order('due_date', { ascending: true })
+        .limit(100)
+
+      console.log('🔍 [알림 디버그] Step 2 - data:', data)
+      console.log('🔍 [알림 디버그] Step 2 - error:', error)
+      console.log('🔍 [알림 디버그] Step 2 - data?.length:', data?.length)
+
+      if (error) throw error
+
+      // Filter by cardIds and map to expected format (store all for client-side member filter)
+      const mappedTasks = (data || [])
+        .filter((item: any) => {
+          const cardId = item.checklists?.cards?.id
+          return cardId && cardIds.includes(cardId)
+        })
+        .map((item: any) => ({
+          ...item,
+          cards: item.checklists?.cards || null
+        }))
+
+      // Sort: overdue items first, then upcoming — each group sorted by due_date ascending
+      const filteredTasks = [
+        ...mappedTasks.filter((t: any) => t.due_date < today),
+        ...mappedTasks.filter((t: any) => t.due_date >= today),
+      ]
+
+      console.log('🔍 [알림 디버그] Step 2 - filteredTasks:', filteredTasks)
+      setAllUpcomingTasks(filteredTasks as UpcomingTask[])
+    } catch (err) {
+      console.error('❌ [알림 디버그] Error fetching upcoming tasks:', err)
+      setAllUpcomingTasks([])
+    } finally {
+      setAlarmLoading(false)
+    }
+  }
+
+  return (
+    <div className="bg-navy-light px-6 py-3 flex items-center justify-between">
+      {/* Left: pill toggle */}
+      <div className="flex rounded-full border border-white/30 overflow-hidden text-sm">
+        <button
+          onClick={() => handleViewChange('board')}
+          className={`px-4 py-1.5 transition-colors ${
+            currentView === 'board'
+              ? 'bg-white text-gray-900 font-medium'
+              : 'text-white/60 hover:text-white'
+          }`}
+        >
+          보드뷰
+        </button>
+        <button
+          onClick={() => handleViewChange('calendar')}
+          className={`px-4 py-1.5 transition-colors ${
+            currentView === 'calendar'
+              ? 'bg-white text-gray-900 font-medium'
+              : 'text-white/60 hover:text-white'
+          }`}
+        >
+          달력뷰
+        </button>
+      </div>
+
+      {/* Right: alarm + filter */}
+      <div className="flex items-center gap-3">
+        {/* 주간 리포트 button */}
+        <button
+          onClick={() => setIsReportOpen(true)}
+          className="flex items-center gap-1.5 px-3 py-1.5 text-sm text-white/80 hover:text-white hover:bg-white/10 rounded-lg transition-colors"
+        >
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+            <polyline points="14 2 14 8 20 8"/>
+            <line x1="8" y1="13" x2="16" y2="13"/>
+            <line x1="8" y1="17" x2="16" y2="17"/>
+          </svg>
+          주간 리포트
+        </button>
+
+        {isReportOpen && (
+          <WeeklyReportModal
+            boardId={boardId}
+            users={users}
+            onClose={() => setIsReportOpen(false)}
+          />
+        )}
+
+        {/* 아카이빙 button */}
+        <div className="relative" ref={archiveRef}>
+          <button
+            onClick={() => setIsArchiveOpen((prev) => !prev)}
+            className="flex items-center gap-1.5 px-3 py-1.5 text-sm text-white/80 hover:text-white hover:bg-white/10 rounded-lg transition-colors"
+          >
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <polyline points="21 8 21 21 3 21 3 8"/><rect x="1" y="3" width="22" height="5"/><line x1="10" y1="12" x2="14" y2="12"/>
+            </svg>
+            아카이빙
+          </button>
+
+          {isArchiveOpen && (
+            <ArchivePanel
+              boardId={boardId}
+              users={users}
+              onUpdate={() => { onBoardUpdate(); }}
+              onClose={() => setIsArchiveOpen(false)}
+            />
+          )}
+        </div>
+
+        {/* 알림 button */}
+        <div className="relative" ref={alarmRef}>
+          <button
+            onClick={handleAlarmClick}
+            className="flex items-center gap-1.5 px-3 py-1.5 text-sm text-white/80 hover:text-white hover:bg-white/10 rounded-lg transition-colors"
+          >
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/>
+              <path d="M13.73 21a2 2 0 0 1-3.46 0"/>
+            </svg>
+            알림
+          </button>
+
+          {isAlarmOpen && (
+            <div className="absolute right-0 top-full mt-2 w-80 bg-white rounded-xl shadow-2xl border border-gray-200 z-50 overflow-hidden">
+              <div className="px-4 py-3 border-b border-gray-100 space-y-2">
+                <h3 className="font-semibold text-gray-800 text-sm">할 일 알림 (상위 10개)</h3>
+                <select
+                  value={selectedAlarmMember || 'all'}
+                  onChange={(e) => setSelectedAlarmMember(e.target.value === 'all' ? null : e.target.value)}
+                  className="w-full px-2 py-1 text-xs border border-gray-200 rounded-lg text-gray-600 focus:outline-none focus:ring-1 focus:ring-gray-300"
+                >
+                  <option value="all">전체 멤버</option>
+                  {users.map((user) => (
+                    <option key={user.id} value={user.id}>{user.name}</option>
+                  ))}
+                </select>
+              </div>
+
+              {alarmLoading ? (
+                <div className="px-4 py-6 text-center text-sm text-gray-400">불러오는 중...</div>
+              ) : (() => {
+                const today = new Date().toISOString().split('T')[0]
+                const displayedTasks = (selectedAlarmMember
+                  ? allUpcomingTasks.filter((task) =>
+                      task.cards?.card_members.some((m) => m.user_id === selectedAlarmMember)
+                    )
+                  : allUpcomingTasks
+                ).slice(0, 10)
+
+                return displayedTasks.length === 0 ? (
+                  <div className="px-4 py-6 text-center text-sm text-gray-400">임박한 할 일이 없습니다</div>
+                ) : (
+                  <ul>
+                    {displayedTasks.map((task) => {
+                      const isOverdue = task.due_date.split('T')[0] < today
+                      const members = task.cards?.card_members ?? []
+                      const memberNames = members
+                        .map((m) => m.profiles?.name)
+                        .filter(Boolean)
+                        .join(', ')
+                      const dueDateStr = new Date(task.due_date.split('T')[0] + 'T00:00:00')
+                        .toLocaleDateString('ko-KR', { month: 'short', day: 'numeric' })
+
+                      return (
+                        <li
+                          key={task.id}
+                          className={`px-4 py-3 border-b last:border-0 ${
+                            isOverdue
+                              ? 'bg-red-50 border-red-100 hover:bg-red-100'
+                              : 'border-gray-100 hover:bg-gray-50'
+                          }`}
+                        >
+                          <div className="flex items-start justify-between gap-2">
+                            <div className="flex items-center gap-1.5 min-w-0">
+                              {isOverdue && (
+                                <span className="shrink-0 text-xs font-semibold text-red-500 bg-red-100 px-1.5 py-0.5 rounded">
+                                  기한 초과
+                                </span>
+                              )}
+                              <span className={`text-sm font-medium leading-snug ${isOverdue ? 'text-red-800' : 'text-gray-800'}`}>
+                                {task.title}
+                              </span>
+                            </div>
+                            <span className={`flex items-center gap-1 text-xs shrink-0 ${isOverdue ? 'text-red-400 font-medium' : 'text-gray-600'}`}>
+                              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                <rect x="3" y="4" width="18" height="18" rx="2" ry="2"/>
+                                <line x1="16" y1="2" x2="16" y2="6"/>
+                                <line x1="8" y1="2" x2="8" y2="6"/>
+                                <line x1="3" y1="10" x2="21" y2="10"/>
+                              </svg>
+                              {dueDateStr}
+                            </span>
+                          </div>
+                          <div className="mt-1 text-xs text-gray-600">
+                            {task.cards?.title && (
+                              <span className={isOverdue ? 'text-red-400' : 'text-gray-700'}>{task.cards.title}</span>
+                            )}
+                            {memberNames && (
+                              <span className="inline-flex items-center gap-1 ml-2 text-gray-600">
+                                ·
+                                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                  <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/>
+                                  <circle cx="12" cy="7" r="4"/>
+                                </svg>
+                                {memberNames}
+                              </span>
+                            )}
+                            {!memberNames && (
+                              <span className="ml-2 text-gray-400">· 담당자 없음</span>
+                            )}
+                          </div>
+                        </li>
+                      )
+                    })}
+                  </ul>
+                )
+              })()}
+            </div>
+          )}
+        </div>
+
+        {/* User filter */}
+        <div className="flex items-center gap-1.5">
+          <span className="flex items-center gap-1 text-sm text-white/80">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/>
+              <circle cx="12" cy="7" r="4"/>
+            </svg>
+            필터:
+          </span>
+          <select
+            value={selectedUser || 'all'}
+            onChange={handleUserFilterChange}
+            className="px-3 py-1 bg-white text-navy rounded focus:outline-none focus:ring-2 focus:ring-white text-sm"
+          >
+            <option value="all">모두 보기</option>
+            {users.map((user) => (
+              <option key={user.id} value={user.id}>
+                {user.name}
+              </option>
+            ))}
+          </select>
+        </div>
+      </div>
+    </div>
+  )
+}
